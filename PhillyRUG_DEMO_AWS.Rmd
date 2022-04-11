@@ -1,0 +1,152 @@
+
+---
+title: "PhillyRUG_DEMO"
+output:
+  html_document:
+    toc: true
+---
+
+
+```{r}
+install.packages("caret")
+install.packages("tictoc")
+install.packages("skimr")
+```
+
+
+```{r}
+library(tidyverse)
+library(sparklyr)
+library(caret)
+library(skimr)
+library(tictoc)
+
+```
+
+
+```{r}
+sc <- spark_connect(method = "databricks")
+```
+
+
+```{r}
+sc %>%
+  
+  copy_to(mtcars, "spark_mtcars", overwrite = T) ->
+  
+  spark_mtcars
+
+
+
+#make a really big table to show performance increase
+mtcars_giant <- mtcars
+
+for (val in rep(1,12)) {
+mtcars_giant <- rbind(mtcars_giant, mtcars_giant)
+}
+
+sc %>%
+  
+  copy_to(mtcars_giant, "spark_mtcars_giant", overwrite = T) ->
+  
+  spark_mtcars_giant
+
+skim(mtcars_giant)
+
+```
+
+
+```{r}
+partitions <- spark_mtcars_giant %>%
+  select(mpg, wt, cyl) %>% 
+  sdf_random_split(training = 0.7, test = 0.3, seed = 1234)
+
+tic()
+partitions$training %>%
+  ml_linear_regression(mpg ~ .) ->
+  fit
+toc()
+
+pred <- ml_predict(fit, partitions$test)
+
+summary(fit)
+
+head(pred)
+
+
+```
+
+
+```{r}
+
+# Step 1: Get row numbers for the training data
+trainRowNumbers <- createDataPartition(mtcars_giant$mpg, p=0.8, list=FALSE)
+
+# Step 2: Create the training  dataset
+trainData <- mtcars_giant[trainRowNumbers,]
+
+# Step 3: Create the test dataset
+testData <- mtcars_giant[-trainRowNumbers,]
+
+
+mtcars_giant %>%
+  select(mpg, wt, cyl) ->
+  mtcars_giant_model_data
+
+
+tic()
+train(mpg ~ ., data=mtcars_giant_model_data, method='lm')
+toc()
+```
+
+
+```{r}
+%md
+
+Let's do a random forest now
+
+```
+
+
+```{r}
+partitions <- spark_mtcars_giant %>%
+  select(mpg, wt, cyl) %>% 
+  sdf_random_split(training = 0.7, test = 0.3, seed = 1234)
+
+tic()
+partitions$training %>%
+  ml_random_forest(mpg ~ ., num_trees  = 10) ->
+  fit
+toc()
+
+pred <- ml_predict(fit, partitions$test)
+
+summary(fit)
+
+head(pred)
+
+
+```
+
+
+```{r}
+# Step 1: Get row numbers for the training data
+trainRowNumbers <- createDataPartition(mtcars_giant$mpg, p=0.8, list=FALSE)
+
+# Step 2: Create the training  dataset
+trainData <- mtcars_giant[trainRowNumbers,]
+
+# Step 3: Create the test dataset
+testData <- mtcars_giant[-trainRowNumbers,]
+
+
+mtcars_giant %>%
+  select(mpg, wt, cyl) ->
+  mtcars_giant_model_data
+
+
+tic()
+train(mpg ~ ., data=mtcars_giant_model_data, method='rf', ntree=10)
+toc()
+```
+

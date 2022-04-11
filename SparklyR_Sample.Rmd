@@ -1,0 +1,269 @@
+---
+title: "PhillyRUG SparklyR"
+output: html_notebook
+---
+
+
+Load relevant libraries
+
+```{r}
+library(tidyverse)
+library(sparklyr)
+library(skimr)
+library(caret)
+library(tictoc)
+
+```
+
+
+Install spark if you don't already have it
+```{r}
+spark_install()
+```
+
+
+Connect to spark, we will do locally
+
+NOTE: Need to install Java and restart RStudio if you don't already have JAVA 8 installed
+https://www.java.com/en/download/
+
+```{r}
+
+sc <- spark_connect(master = "local")
+
+```
+
+Load tables into spark
+
+```{r}
+
+sc %>%
+  
+  copy_to(mtcars, "spark_mtcars", overwrite = T) ->
+  
+  spark_mtcars
+
+
+
+#make a really big table to show performance increase
+mtcars_giant <- mtcars
+
+for (val in rep(1,12)) {
+mtcars_giant <- rbind(mtcars_giant, mtcars_giant)
+}
+
+skim(mtcars_giant)
+
+
+
+sc %>%
+  
+  copy_to(mtcars_giant, "spark_mtcars_giant", overwrite = T) ->
+  
+  spark_mtcars_giant
+
+
+
+```
+Check classes to verify transfer into Spark
+
+```{r}
+
+class(spark_mtcars)
+class(mtcars)
+
+```
+
+
+Query in Spark using dplyr syntax (avg Horsepower by cylinder count)
+
+I am going to time it to show that Spark is inefficient for small computation that can be handled in memory
+
+```{r}
+
+#memory
+tic()
+mtcars %>%
+  
+  group_by(cyl) %>%
+  summarise(
+    avg_hp = mean(hp)
+            ) %>%
+  arrange(cyl)
+toc()
+
+#spark
+tic()
+spark_mtcars %>%
+  
+  group_by(cyl) %>%
+  summarise(
+    avg_hp = mean(hp)
+            ) %>%
+  arrange(cyl)
+toc()
+
+
+```
+
+Model the data in spark
+https://spark.rstudio.com/get-started/model-data.html
+
+```{r}
+
+
+partitions <- spark_mtcars %>%
+  select(mpg, wt, cyl) %>% 
+  sdf_random_split(training = 0.7, test = 0.3, seed = 1234)
+
+tic()
+partitions$training %>%
+  ml_linear_regression(mpg ~ .) ->
+  fit
+toc()
+
+pred <- ml_predict(fit, partitions$test)
+
+summary(fit)
+
+head(pred)
+
+
+
+```
+
+Model the data locally
+
+```{r}
+
+
+# Step 1: Get row numbers for the training data
+trainRowNumbers <- createDataPartition(mtcars$mpg, p=0.8, list=FALSE)
+
+# Step 2: Create the training  dataset
+trainData <- mtcars[trainRowNumbers,]
+
+# Step 3: Create the test dataset
+testData <- mtcars[-trainRowNumbers,]
+
+
+mtcars %>%
+  select(mpg, wt, cyl) ->
+  mtcars_model_data
+
+
+tic()
+train(mpg ~ ., data=mtcars_model_data, method='lm')
+toc()
+
+```
+
+Now let's do it on the big data
+
+Spark
+```{r}
+
+partitions <- spark_mtcars_giant %>%
+  select(mpg, wt, cyl) %>% 
+  sdf_random_split(training = 0.7, test = 0.3, seed = 1234)
+
+tic()
+partitions$training %>%
+  ml_linear_regression(mpg ~ .) ->
+  fit
+toc()
+
+pred <- ml_predict(fit, partitions$test)
+
+summary(fit)
+
+head(pred)
+
+
+
+```
+
+Locally
+```{r}
+
+
+# Step 1: Get row numbers for the training data
+trainRowNumbers <- createDataPartition(mtcars_giant$mpg, p=0.8, list=FALSE)
+
+# Step 2: Create the training  dataset
+trainData <- mtcars_giant[trainRowNumbers,]
+
+# Step 3: Create the test dataset
+testData <- mtcars_giant[-trainRowNumbers,]
+
+
+mtcars_giant %>%
+  select(mpg, wt, cyl) ->
+  mtcars_giant_model_data
+
+
+tic()
+train(mpg ~ ., data=mtcars_giant_model_data, method='lm')
+toc()
+
+```
+
+
+Let's see if we can get speed up on larger data set
+
+```{r}
+
+# import library
+library("nycflights13")
+
+flights13 <- nycflights13::flights
+
+#only 32 MB, let's bind it to itself exponentially a bunch of times
+
+
+# for (val in rep(1,3)) {
+# flights13 <- rbind(flights13, flights13)
+# }
+
+# flights13 <- rbind(flights13, flights13)
+
+#This is like 8 gig now
+
+#put it in spark
+copy_to(sc, flights13, "spark_flights", overwrite = T) ->
+  
+  spark_flights13
+
+
+skim(flights13)
+
+
+```
+
+
+Let's look at trip speed by carrier
+
+```{r}
+
+# spark
+tic()
+spark_flights13 %>%
+  mutate(speed = distance/air_time) %>%
+  
+  group_by(carrier)%>%
+  summarise(avg_speed = mean(speed, na.rm = T)) %>%
+  arrange(desc(avg_speed))
+toc()
+
+#memory
+tic()
+flights13 %>%
+  mutate(speed = distance/air_time) %>%
+  
+  group_by(carrier)%>%
+  summarise(avg_speed = mean(speed, na.rm = T)) %>%
+  arrange(desc(avg_speed))
+toc()
+
+```
+
